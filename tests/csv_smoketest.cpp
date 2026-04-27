@@ -96,6 +96,36 @@ int main() {
     assert(dead_result.num_rows()==10);
     assert(dead_result.num_columns()==2);
 
+    // Consecutive projection merging: two SelectNames collapsed into one
+    auto proj_plan = scan_csv(emp_csv)
+        .select({"id","name","dept_id","age","salary"})
+        .select({"id","name","salary"});
+
+    assert(proj_plan.explain(kGen+"/proj_plan.png").ok());
+    std::cout << "Proj-merge logical:   " << kGen << "/proj_plan_logical.png\n";
+    std::cout << "Proj-merge optimized: " << kGen << "/proj_plan_optimized.png\n";
+
+    auto proj_result = proj_plan.collect();
+    assert(proj_result.num_rows()==10);
+    assert(proj_result.num_columns()==3);
+
+    // Join predicate splitting: conjunction split across left/right inputs
+    // Left schema known via explicit select; age -> left, dept_name -> right
+    auto join_split_plan =
+        scan_csv(emp_csv).select({"id","name","dept_id","age","salary"})
+        .join(
+            scan_csv(dept_csv).select({"dept_id","dept_name","location"}),
+            {"dept_id"}, "inner")
+        .filter(col("age") > lit(30) & col("dept_name").starts_with("E"));
+
+    assert(join_split_plan.explain(kGen+"/join_split_plan.png").ok());
+    std::cout << "Join-split logical:   " << kGen << "/join_split_plan_logical.png\n";
+    std::cout << "Join-split optimized: " << kGen << "/join_split_plan_optimized.png\n";
+
+    auto join_split_result = join_split_plan.collect();
+    assert(join_split_result.num_rows()==1);
+    assert(join_split_result.num_columns()==7);
+
     // GroupBy predicate pushdown check
     auto groupby_plan = scan_csv(emp_csv)
         .join(scan_csv(dept_csv), {"dept_id"}, "inner")
@@ -119,6 +149,10 @@ int main() {
     assert(std::filesystem::exists(kGen+"/groupby_plan_optimized.png"));
     assert(std::filesystem::exists(kGen+"/dead_plan_logical.png"));
     assert(std::filesystem::exists(kGen+"/dead_plan_optimized.png"));
+    assert(std::filesystem::exists(kGen+"/proj_plan_logical.png"));
+    assert(std::filesystem::exists(kGen+"/proj_plan_optimized.png"));
+    assert(std::filesystem::exists(kGen+"/join_split_plan_logical.png"));
+    assert(std::filesystem::exists(kGen+"/join_split_plan_optimized.png"));
 
     std::cout << "All smoke tests passed.\n";
     return 0;

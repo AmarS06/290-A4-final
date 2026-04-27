@@ -774,6 +774,95 @@ bool IsExactSelectNames(const std::shared_ptr<PlanNode>& node,
     return select->columns()==columns;
 }
 
+std::optional<std::unordered_set<std::string>> TryGetOutputColumns(
+    const std::shared_ptr<PlanNode>& node) {
+    if (!node) return std::nullopt;
+    switch (node->kind()) {
+        case PlanNode::Kind::SelectNames: {
+            const auto* n=dynamic_cast<const SelectNamesNode*>(node.get());
+            if (!n) return std::nullopt;
+            return std::unordered_set<std::string>(n->columns().begin(), n->columns().end());
+        }
+        case PlanNode::Kind::SelectExprs: {
+            const auto* n=dynamic_cast<const SelectExprsNode*>(node.get());
+            if (!n) return std::nullopt;
+            std::unordered_set<std::string> cols;
+            for (std::size_t i=0; i<n->expressions().size(); ++i) {
+                const auto& expr=n->expressions()[i];
+                if (expr.node().kind()==ExprNode::Kind::Alias) {
+                    cols.insert(static_cast<const AliasNode&>(expr.node()).name());
+                } else if (expr.node().kind()==ExprNode::Kind::Col) {
+                    cols.insert(static_cast<const ColNode&>(expr.node()).name());
+                } else {
+                    cols.insert("expr_"+std::to_string(i));
+                }
+            }
+            return cols;
+        }
+        case PlanNode::Kind::Filter: {
+            const auto* n=dynamic_cast<const FilterNode*>(node.get());
+            if (!n) return std::nullopt;
+            return TryGetOutputColumns(n->input());
+        }
+        case PlanNode::Kind::Sort: {
+            const auto* n=dynamic_cast<const SortNode*>(node.get());
+            if (!n) return std::nullopt;
+            return TryGetOutputColumns(n->input());
+        }
+        case PlanNode::Kind::Head: {
+            const auto* n=dynamic_cast<const HeadNode*>(node.get());
+            if (!n) return std::nullopt;
+            return TryGetOutputColumns(n->input());
+        }
+        case PlanNode::Kind::WithColumn: {
+            const auto* n=dynamic_cast<const WithColumnNode*>(node.get());
+            if (!n) return std::nullopt;
+            auto cols=TryGetOutputColumns(n->input());
+            if (!cols) return std::nullopt;
+            cols->insert(n->name());
+            return cols;
+        }
+        case PlanNode::Kind::GroupByAggregate: {
+            const auto* n=dynamic_cast<const GroupByAggregateNode*>(node.get());
+            if (!n) return std::nullopt;
+            std::unordered_set<std::string> cols(n->keys().begin(), n->keys().end());
+            for (const auto& kv : n->agg_map()) cols.insert(kv.first);
+            return cols;
+        }
+        case PlanNode::Kind::Join: {
+            const auto* n=dynamic_cast<const JoinNode*>(node.get());
+            if (!n) return std::nullopt;
+            auto left=TryGetOutputColumns(n->input());
+            auto right=TryGetOutputColumns(n->right_input());
+            if (!left||!right) return std::nullopt;
+            for (const auto& c : *right) left->insert(c);
+            return left;
+        }
+        default:
+            return std::nullopt;
+    }
+}
+
+void SplitConjunction(const std::shared_ptr<ExprNode>& node, std::vector<Expr>* clauses) {
+    if (!node) return;
+    if (node->kind()==ExprNode::Kind::Binary) {
+        const auto* bin=dynamic_cast<const BinaryNode*>(node.get());
+        if (bin&&bin->op()==BinaryOpKind::kAnd) {
+            SplitConjunction(bin->left(), clauses);
+            SplitConjunction(bin->right(), clauses);
+            return;
+        }
+    }
+    auto expr_opt=TryExprFromNode(node);
+    if (expr_opt.has_value()) clauses->push_back(*expr_opt);
+}
+
+Expr CombineClauses(const std::vector<Expr>& clauses) {
+    Expr result=clauses[0];
+    for (std::size_t i=1; i<clauses.size(); ++i) result=result&clauses[i];
+    return result;
+}
+
 std::shared_ptr<PlanNode> MakePlanWithOptimizedExprs(const std::shared_ptr<PlanNode>& node);
 std::shared_ptr<PlanNode> ApplyPredicatePushdown(const std::shared_ptr<PlanNode>& node) {
     if (!node||node->kind()!=PlanNode::Kind::Filter) {
@@ -1137,13 +1226,129 @@ std::shared_ptr<PlanNode> ApplyDeadWithColumnElimination(const std::shared_ptr<P
     return node;
 }
 
+// Consecutive Projection Merging
+std::shared_ptr<PlanNode> ApplyProjectionMerging(const std::shared_ptr<PlanNode>& node) {
+    if (!node||node->kind()!=PlanNode::Kind::SelectNames) {
+        return node;
+    }
+    const auto* outer=dynamic_cast<const SelectNamesNode*>(node.get());
+    if (!outer||!outer->input()) {
+        return node;
+    }
+    if (outer->input()->kind()==PlanNode::Kind::SelectNames) {
+        const auto* inner=dynamic_cast<const SelectNamesNode*>(outer->input().get());
+        if (inner) {
+            return std::make_shared<SelectNamesNode>(inner->input(), outer->columns());
+        }
+    }
+    if (outer->input()->kind()==PlanNode::Kind::SelectExprs) {
+        const auto* inner=dynamic_cast<const SelectExprsNode*>(outer->input().get());
+        if (inner) {
+            const std::unordered_set<std::string> needed(
+                outer->columns().begin(), outer->columns().end());
+            std::unordered_map<std::string, Expr> by_name;
+            for (std::size_t i=0; i<inner->expressions().size(); ++i) {
+                const auto& expr=inner->expressions()[i];
+                std::string out_name;
+                if (expr.node().kind()==ExprNode::Kind::Alias) {
+                    out_name=static_cast<const AliasNode&>(expr.node()).name();
+                } else if (expr.node().kind()==ExprNode::Kind::Col) {
+                    out_name=static_cast<const ColNode&>(expr.node()).name();
+                }
+                if (!out_name.empty()&&needed.count(out_name)) {
+                    by_name.emplace(out_name, expr);
+                }
+            }
+            if (by_name.size()==outer->columns().size()) {
+                std::vector<Expr> ordered;
+                ordered.reserve(outer->columns().size());
+                for (const auto& col_name : outer->columns()) {
+                    auto it=by_name.find(col_name);
+                    if (it==by_name.end()) return node;
+                    ordered.push_back(it->second);
+                }
+                return std::make_shared<SelectExprsNode>(inner->input(), ordered);
+            }
+        }
+    }
+    return node;
+}
+
+// Join Predicate Splitting
+std::shared_ptr<PlanNode> ApplyJoinPredicateSplitting(const std::shared_ptr<PlanNode>& node) {
+    if (!node||node->kind()!=PlanNode::Kind::Filter) {
+        return node;
+    }
+    const auto* filter=dynamic_cast<const FilterNode*>(node.get());
+    if (!filter||!filter->input()||
+        filter->input()->kind()!=PlanNode::Kind::Join) {
+        return node;
+    }
+    const auto* join=dynamic_cast<const JoinNode*>(filter->input().get());
+    if (!join||join->how()!="inner") {
+        return node;
+    }
+    const auto left_cols_opt=TryGetOutputColumns(join->input());
+    const auto right_cols_opt=TryGetOutputColumns(join->right_input());
+    if (!left_cols_opt||!right_cols_opt) {
+        return node;
+    }
+    const auto& left_cols=*left_cols_opt;
+    const auto& right_cols=*right_cols_opt;
+    const std::unordered_set<std::string> key_set(join->on().begin(), join->on().end());
+    std::vector<Expr> clauses;
+    SplitConjunction(filter->predicate().node_ptr(), &clauses);
+    if (clauses.size()<=1) {
+        return node;
+    }
+    std::vector<Expr> left_clauses, right_clauses, remaining_clauses;
+    for (const auto& clause : clauses) {
+        std::unordered_set<std::string> refs;
+        CollectColumnsFromExpr(clause.node_ptr(), &refs);
+        std::unordered_set<std::string> non_key_refs;
+        for (const auto& r : refs) {
+            if (!key_set.count(r)) non_key_refs.insert(r);
+        }
+        if (non_key_refs.empty()) {
+            remaining_clauses.push_back(clause);
+            continue;
+        }
+        bool fits_left=true, fits_right=true;
+        for (const auto& r : non_key_refs) {
+            if (!left_cols.count(r))  fits_left=false;
+            if (!right_cols.count(r)) fits_right=false;
+        }
+        if (fits_left&&!fits_right)       left_clauses.push_back(clause);
+        else if (fits_right&&!fits_left)  right_clauses.push_back(clause);
+        else                              remaining_clauses.push_back(clause);
+    }
+    if (left_clauses.empty()&&right_clauses.empty()) {
+        return node;
+    }
+    std::shared_ptr<PlanNode> new_left=join->input();
+    std::shared_ptr<PlanNode> new_right=join->right_input();
+    if (!left_clauses.empty()) {
+        new_left=std::make_shared<FilterNode>(new_left, CombineClauses(left_clauses));
+    }
+    if (!right_clauses.empty()) {
+        new_right=std::make_shared<FilterNode>(new_right, CombineClauses(right_clauses));
+    }
+    auto new_join=std::make_shared<JoinNode>(new_left, new_right, join->on(), join->how());
+    if (!remaining_clauses.empty()) {
+        return std::make_shared<FilterNode>(new_join, CombineClauses(remaining_clauses));
+    }
+    return new_join;
+}
+
 std::shared_ptr<PlanNode> ApplyAllRules(const std::shared_ptr<PlanNode>& node) {
     auto current=MakePlanWithOptimizedExprs(node);
     current=ApplyConstantFilterElimination(current);
     current=ApplyPredicatePushdown(current);
+    current=ApplyJoinPredicateSplitting(current);
     current=ApplyProjectionPushdown(current);
     current=ApplyLimitPushdown(current);
     current=ApplyDeadWithColumnElimination(current);
+    current=ApplyProjectionMerging(current);
     return current;
 }
 

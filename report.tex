@@ -808,6 +808,136 @@ substantial.  The optimisation also reduces plan depth, which shortens the
 executor's dispatch loop.
 
 %------------------------------------------------------------------
+\subsection{Consecutive Projection Merging}
+%------------------------------------------------------------------
+
+\subsubsection*{Transformation}
+
+\texttt{ApplyProjectionMerging} inspects a \texttt{SelectNamesNode} and
+collapses it with a projection immediately below it:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{SelectNames above SelectNames:} The outer (downstream)
+        projection is rewired directly to the inner node's input, discarding
+        the inner \texttt{SelectNamesNode} entirely.  Because the outer
+        column list is already a subset of the inner one (if the plan is
+        valid), no column safety check is required.
+
+  \item \textbf{SelectNames above SelectExprs:} The expressions whose
+        output names match the outer column list are filtered and reordered
+        to match the outer column order, producing a single
+        \texttt{SelectExprsNode}.  If any required name cannot be resolved,
+        the transformation is skipped.
+\end{itemize}
+
+\subsubsection*{Correctness}
+
+A projection is a pure column-subsetting operation.  Applying two
+projections $\pi_A(\pi_B(R))$ where $A \subseteq B$ is equivalent to
+$\pi_A(R)$ by the standard projection absorption law.  For the
+\texttt{SelectNames\,+\,SelectExprs} case, only the expressions whose
+declared output names are in the outer set are retained; all others are
+unreachable and their removal cannot affect the result.
+
+\subsubsection*{Example}
+
+\begin{lstlisting}
+// Original (redundant wide projection followed by narrow one)
+scan_csv("employees.csv")
+  .select({"id", "name", "dept_id", "age", "salary"})
+  .select({"id", "name", "salary"})
+
+// After consecutive projection merging
+scan_csv("employees.csv")
+  .select({"id", "name", "salary"})
+\end{lstlisting}
+
+\subsubsection*{Performance benefit}
+
+Eliminates an entire projection pass -- no intermediate column-subset array
+is allocated.  More importantly it reduces plan depth, which shortens the
+dispatch loop in \texttt{ExecutePlan} and creates a shallower structure for
+other pushdown rules to traverse.
+
+%------------------------------------------------------------------
+\subsection{Join Predicate Splitting}
+%------------------------------------------------------------------
+
+\subsubsection*{Transformation}
+
+\texttt{ApplyJoinPredicateSplitting} fires when a \texttt{FilterNode} sits
+directly above an inner \texttt{JoinNode} and the predicate is a
+conjunction.  The transformation proceeds as follows:
+
+\begin{enumerate}[leftmargin=1.5em]
+  \item \texttt{SplitConjunction} recursively decomposes the predicate on
+        \texttt{AND} boundaries into a flat list of clauses.
+  \item \texttt{TryGetOutputColumns} is called on each join input to
+        determine its output column set.  The function traverses
+        \texttt{SelectNames}, \texttt{SelectExprs}, \texttt{Filter},
+        \texttt{Sort}, \texttt{Head}, \texttt{WithColumn},
+        \texttt{GroupByAggregate}, and \texttt{Join} nodes; it returns
+        \texttt{nullopt} for bare scan nodes whose schema is unknown at
+        plan time.
+  \item Each clause is classified: non-key columns that belong exclusively
+        to the left schema are pushed to the left input; those belonging
+        exclusively to the right schema are pushed to the right input;
+        clauses that span both sides (or reference only join keys) remain
+        above the join.
+  \item New \texttt{FilterNode}s are inserted into the respective inputs,
+        and any remaining clauses are reassembled with
+        \texttt{CombineClauses} above the rebuilt join.
+\end{enumerate}
+
+The optimisation applies only to inner joins; outer, left, and right joins
+are left unchanged because null-padding semantics make independent
+pre-filtering incorrect.
+
+\subsubsection*{Correctness}
+
+For an inner join, a row pair $(L, R)$ appears in the output iff the join
+key matches \emph{and} all predicates evaluate to true.  If clause $p_L$
+references only columns from $L$ and clause $p_R$ references only columns
+from $R$, then:
+
+\[
+\sigma_{p_L \wedge p_R}(L \bowtie R) = (\sigma_{p_L} L) \bowtie (\sigma_{p_R} R)
+\]
+
+This follows because $p_L(L, R) = p_L(L)$ and $p_R(L, R) = p_R(R)$, so
+filtering can be applied to each side independently before the join is
+formed.  The key-only check avoids pushing predicates on join-key columns
+(which would interact with the null-handling logic in the existing predicate
+pushdown rule).
+
+\subsubsection*{Example}
+
+\begin{lstlisting}
+// Original: combined filter above join
+scan_csv("employees.csv").select({"id","name","dept_id","age","salary"})
+  .join(
+    scan_csv("departments.csv").select({"dept_id","dept_name","location"}),
+    {"dept_id"}, "inner")
+  .filter(col("age") > lit(30) & col("dept_name").starts_with("E"))
+
+// After join predicate splitting (age -> left, dept_name -> right)
+scan_csv("employees.csv").select({...}).filter(col("age") > lit(30))
+  .join(
+    scan_csv("departments.csv").select({...}).filter(col("dept_name").starts_with("E")),
+    {"dept_id"}, "inner")
+\end{lstlisting}
+
+\subsubsection*{Performance benefit}
+
+Both inputs to the join are filtered before the hash index is built and
+probed.  In the example, only Engineering rows survive on the right (1 of
+3 departments), and only employees older than 30 survive on the left (5 of
+10).  The hash index is built over 1 row instead of 3, and only 5 left rows
+are probed instead of 10 -- a combined reduction of roughly $5\times$ in
+join work on this dataset.  The saving scales with selectivity and is
+particularly large when one side is highly selective.
+
+%------------------------------------------------------------------
 \subsection{Filter Merge (Predicate Conjunction)}
 %------------------------------------------------------------------
 
