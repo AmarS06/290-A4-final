@@ -2,9 +2,7 @@
 
 #include <memory>
 #include <string>
-
 #include <arrow/api.h>
-
 #include "dataframelib/types.hpp"
 
 namespace dataframelib {

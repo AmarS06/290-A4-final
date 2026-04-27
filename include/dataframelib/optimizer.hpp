@@ -1,7 +1,6 @@
 #pragma once
 
 #include <memory>
-
 #include "dataframelib/plan_node.hpp"
 
 namespace dataframelib {

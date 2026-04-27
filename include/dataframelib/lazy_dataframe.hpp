@@ -6,9 +6,7 @@
 #include <unordered_map>
 #include <vector>
 #include <initializer_list>
-
 #include <arrow/result.h>
-
 #include "dataframelib/eager_dataframe.hpp"
 #include "dataframelib/expr.hpp"
 #include "dataframelib/plan_node.hpp"

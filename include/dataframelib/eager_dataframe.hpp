@@ -5,9 +5,7 @@
 #include <unordered_map>
 #include <vector>
 #include <initializer_list>
-
 #include <arrow/api.h>
-
 #include "dataframelib/column.hpp"
 #include "dataframelib/expr.hpp"
 

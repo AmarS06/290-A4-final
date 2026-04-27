@@ -2,7 +2,6 @@
 
 #include <memory>
 #include <string>
-
 #include <arrow/type.h>
 
 namespace dataframelib {

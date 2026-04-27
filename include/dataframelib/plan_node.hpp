@@ -5,7 +5,6 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
-
 #include "dataframelib/expr.hpp"
 
 namespace dataframelib {

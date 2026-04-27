@@ -2,7 +2,6 @@
 
 #include <memory>
 #include <string>
-
 #include <arrow/scalar.h>
 
 namespace dataframelib {
