@@ -622,6 +622,68 @@ that will be discarded.  For a 1\,000\,000-row table with
 instead of 1\,000\,000.
 
 %------------------------------------------------------------------
+\subsection{Predicate Pushdown through GroupByAggregate}
+%------------------------------------------------------------------
+
+\subsubsection*{Transformation}
+
+When a \texttt{FilterNode} sits directly above a
+\texttt{GroupByAggregateNode} and every column referenced by the predicate
+is a group-key column, the filter is pushed below the aggregate:
+
+\[
+\texttt{group\_by}(K)\texttt{.aggregate}(A)\texttt{.filter}(p)
+\;\longrightarrow\;
+\texttt{filter}(p)\texttt{.group\_by}(K)\texttt{.aggregate}(A)
+\]
+
+The check is performed by \texttt{CollectColumnsFromExpr} on the predicate
+followed by a membership test against the key list.  If any predicate
+column is not a group key (i.e.\ it is an aggregated output column such as
+\texttt{salary\_mean}), the transformation is skipped to preserve
+correctness.
+
+\subsubsection*{Correctness}
+
+A group-key column has the same value for every row in the group and
+survives into the aggregate output unchanged.  Therefore a predicate that
+only tests key columns produces the same boolean result whether it is
+evaluated on the individual input rows or on the single representative row
+emitted per group.  More formally: a group $g$ with key value $k$ is
+included in the output iff $p(k)$ is true; filtering input rows with $p(k)$
+before grouping eliminates exactly those groups, so the set of surviving
+groups and their aggregate values are identical.  Predicates that reference
+aggregated columns (e.g.\ \texttt{salary\_mean > 80000}) cannot be pushed
+down because those values do not exist until after the aggregation
+completes.
+
+\subsubsection*{Example}
+
+\begin{lstlisting}
+// Original plan (filter after aggregation)
+scan_csv("employees.csv")
+  .join(scan_csv("departments.csv"), {"dept_id"}, "inner")
+  .group_by({"dept_name"})
+  .aggregate({{"salary", "mean"}})
+  .filter(col("dept_name") == lit("Engineering"))
+
+// After predicate pushdown through GroupByAggregate
+scan_csv("employees.csv")
+  .join(scan_csv("departments.csv"), {"dept_id"}, "inner")
+  .filter(col("dept_name") == lit("Engineering"))  // <-- pushed down
+  .group_by({"dept_name"})
+  .aggregate({{"salary", "mean"}})
+\end{lstlisting}
+
+\subsubsection*{Performance benefit}
+
+Rows belonging to excluded groups never enter the hash-map construction
+phase of group\_by.  In the example above, only the Engineering rows
+($\approx\!40\%$ of the table) are hashed; HR and Finance rows are
+discarded cheaply by the filter scan.  The saving scales with the
+selectivity of the key predicate and the cost of the aggregation kernel.
+
+%------------------------------------------------------------------
 \subsection{Filter Merge (Predicate Conjunction)}
 %------------------------------------------------------------------
 
