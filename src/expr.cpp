@@ -3,7 +3,9 @@
 #include <stdexcept>
 #include <arrow/scalar.h>
 namespace dataframelib {
+Expr::Expr(bool value) : node_(lit(value).node_) {}
 Expr::Expr(int value) : node_(lit(static_cast<int32_t>(value)).node_) {}
+Expr::Expr(float value) : node_(lit(value).node_) {}
 Expr::Expr(double value) : node_(lit(value).node_) {}
 Expr::Expr(const char* value) : node_(lit(std::string(value)).node_) {}
 Expr::Expr(std::string value) : node_(lit(std::move(value)).node_) {}

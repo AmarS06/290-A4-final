@@ -22,7 +22,9 @@ enum class AggOpKind {
 
 class Expr {
 public:
+    Expr(bool value);
     Expr(int value);
+    Expr(float value);
     Expr(double value);
     Expr(const char* value);
     Expr(std::string value);
