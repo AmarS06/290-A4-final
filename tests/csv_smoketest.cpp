@@ -82,6 +82,24 @@ int main() {
     assert(lazy_result.write_csv(kData+"/lazy_output.csv").ok());
     std::cout << "Lazy output:  " << kData << "/lazy_output.csv\n";
 
+    // Constant filter elimination + dead WithColumn elimination demo.
+    // Logical:   scan -> filter(1==1) -> with_column("double_salary") -> select_exprs([eid, name])
+    // Optimized: scan -> select_exprs([eid, name])
+    //   pass 1: lit(1)==lit(1) folds to lit(true), filter(true) removed;
+    //           SelectExprs sees with_column("double_salary") not referenced -> removed.
+    auto dead_plan = scan_csv(emp_csv)
+        .filter(lit(1) == lit(1))
+        .with_column("double_salary", col("salary") * lit(2))
+        .select(std::vector<Expr>{col("id").alias("eid"), col("name")});
+
+    assert(dead_plan.explain(kGen+"/dead_plan.png").ok());
+    std::cout << "Dead-col logical:   " << kGen << "/dead_plan_logical.png\n";
+    std::cout << "Dead-col optimized: " << kGen << "/dead_plan_optimized.png\n";
+
+    auto dead_result = dead_plan.collect();
+    assert(dead_result.num_rows()==10);
+    assert(dead_result.num_columns()==2);
+
     // GroupBy predicate pushdown check
     auto groupby_plan = scan_csv(emp_csv)
         .join(scan_csv(dept_csv), {"dept_id"}, "inner")
@@ -103,6 +121,8 @@ int main() {
     assert(std::filesystem::exists(kGen+"/plan_optimized.png"));
     assert(std::filesystem::exists(kGen+"/groupby_plan_logical.png"));
     assert(std::filesystem::exists(kGen+"/groupby_plan_optimized.png"));
+    assert(std::filesystem::exists(kGen+"/dead_plan_logical.png"));
+    assert(std::filesystem::exists(kGen+"/dead_plan_optimized.png"));
 
     std::cout << "All smoke tests passed.\n";
     return 0;

@@ -1071,11 +1071,79 @@ std::shared_ptr<PlanNode> MakePlanWithOptimizedExprs(const std::shared_ptr<PlanN
     return node;
 }
 
+// Constant Filter Elimination
+std::shared_ptr<PlanNode> ApplyConstantFilterElimination(const std::shared_ptr<PlanNode>& node) {
+    if (!node||node->kind()!=PlanNode::Kind::Filter) {
+        return node;
+    }
+    const auto* filter=dynamic_cast<const FilterNode*>(node.get());
+    if (!filter) {
+        return node;
+    }
+    LiteralValue lit_val;
+    if (!TryGetLiteralValue(filter->predicate(), &lit_val)||
+        lit_val.kind!=LiteralValue::Kind::kBool) {
+        return node;
+    }
+    if (lit_val.b) {
+        return filter->input();
+    }
+    return std::make_shared<HeadNode>(filter->input(), 0);
+}
+
+// Dead WithColumn Elimination
+std::shared_ptr<PlanNode> ApplyDeadWithColumnElimination(const std::shared_ptr<PlanNode>& node) {
+    if (!node) {
+        return node;
+    }
+    if (node->kind()==PlanNode::Kind::SelectExprs) {
+        const auto* select=dynamic_cast<const SelectExprsNode*>(node.get());
+        if (select&&select->input()&&
+            select->input()->kind()==PlanNode::Kind::WithColumn) {
+            const auto* with_col=dynamic_cast<const WithColumnNode*>(select->input().get());
+            if (with_col) {
+                std::unordered_set<std::string> needed;
+                for (const auto& expr : select->expressions()) {
+                    CollectColumnsFromExpr(expr.node_ptr(), &needed);
+                }
+                if (needed.find(with_col->name())==needed.end()) {
+                    return std::make_shared<SelectExprsNode>(with_col->input(), select->expressions());
+                }
+            }
+        }
+    }
+    if (node->kind()==PlanNode::Kind::GroupByAggregate) {
+        const auto* groupby=dynamic_cast<const GroupByAggregateNode*>(node.get());
+        if (groupby&&groupby->input()&&
+            groupby->input()->kind()==PlanNode::Kind::WithColumn) {
+            const auto* with_col=dynamic_cast<const WithColumnNode*>(groupby->input().get());
+            if (with_col) {
+                const bool is_key=std::find(
+                    groupby->keys().begin(), groupby->keys().end(), with_col->name())!=
+                    groupby->keys().end();
+                if (!is_key) {
+                    std::unordered_set<std::string> needed;
+                    for (const auto& kv : groupby->agg_map()) {
+                        CollectColumnsFromExpr(kv.second.node_ptr(), &needed);
+                    }
+                    if (needed.find(with_col->name())==needed.end()) {
+                        return std::make_shared<GroupByAggregateNode>(
+                            with_col->input(), groupby->keys(), groupby->agg_map());
+                    }
+                }
+            }
+        }
+    }
+    return node;
+}
+
 std::shared_ptr<PlanNode> ApplyAllRules(const std::shared_ptr<PlanNode>& node) {
     auto current=MakePlanWithOptimizedExprs(node);
+    current=ApplyConstantFilterElimination(current);
     current=ApplyPredicatePushdown(current);
     current=ApplyProjectionPushdown(current);
     current=ApplyLimitPushdown(current);
+    current=ApplyDeadWithColumnElimination(current);
     return current;
 }
 

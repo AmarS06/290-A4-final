@@ -432,6 +432,58 @@ that the execution engine must visit at runtime.  For wide tables this
 avoids allocating and populating temporary intermediate arrays.
 
 %------------------------------------------------------------------
+\subsection{Constant Filter Elimination}
+%------------------------------------------------------------------
+
+\subsubsection*{Transformation}
+
+After \texttt{MakePlanWithOptimizedExprs} folds all literal sub-expressions,
+\texttt{ApplyConstantFilterElimination} inspects the predicate of a
+\texttt{FilterNode}.  If the predicate is a boolean literal it is handled as
+follows:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{Predicate is \texttt{lit(true)}:} The filter node is removed
+        entirely and replaced by its child -- no row is ever excluded so the
+        node is pure identity overhead.
+  \item \textbf{Predicate is \texttt{lit(false)}:} The filter is replaced by
+        \texttt{HeadNode(input, 0)}.  This canonicalises ``zero rows
+        possible'' into the existing \texttt{head} mechanism so that
+        subsequent limit pushdown passes can propagate the zero-row signal
+        as close to the scan as possible.
+\end{itemize}
+
+\subsubsection*{Correctness}
+
+$\sigma_{\mathtt{true}}(R) = R$ and $\sigma_{\mathtt{false}}(R) = \emptyset$
+are set-algebra identities.  The \texttt{false} rewrite is safe because
+\texttt{head(0)} on any relation always produces zero rows in the same
+schema, matching the semantics of an impossible filter.  The pass runs
+immediately after constant folding so that predicates like
+\texttt{lit(1)==lit(1)} are already reduced to \texttt{lit(true)} before
+this rule fires.
+
+\subsubsection*{Example}
+
+\begin{lstlisting}
+// Original (tautology predicate that folds to true)
+scan_csv("employees.csv")
+  .filter(lit(1) == lit(1))
+  .select(...)
+
+// After constant folding: lit(1)==lit(1) -> lit(true)
+// After constant filter elimination: filter node removed
+scan_csv("employees.csv")
+  .select(...)
+\end{lstlisting}
+
+\subsubsection*{Performance benefit}
+
+Removes an entire filter evaluation pass -- no boolean array is allocated,
+no mask scan is performed.  For the \texttt{lit(false)} case, combined with
+limit pushdown it can eventually prevent reading the source file at all.
+
+%------------------------------------------------------------------
 \subsection{Predicate Pushdown}
 %------------------------------------------------------------------
 
@@ -682,6 +734,78 @@ phase of group\_by.  In the example above, only the Engineering rows
 ($\approx\!40\%$ of the table) are hashed; HR and Finance rows are
 discarded cheaply by the filter scan.  The saving scales with the
 selectivity of the key predicate and the cost of the aggregation kernel.
+
+%------------------------------------------------------------------
+\subsection{Dead WithColumn Elimination}
+%------------------------------------------------------------------
+
+\subsubsection*{Transformation}
+
+\texttt{ApplyDeadWithColumnElimination} removes a \texttt{WithColumnNode}
+whose derived column is provably never consumed by the immediately
+downstream node.  Two structural patterns are handled:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{SelectExprs above WithColumn:} The set of column names
+        referenced across all output expressions is collected via
+        \texttt{CollectColumnsFromExpr}.  If the derived column name does
+        not appear in that set, the \texttt{with\_column} node is bypassed:
+        \texttt{select\_exprs(E).with\_column(c,e)} $\to$
+        \texttt{select\_exprs(E)} with the input rewired to
+        \texttt{with\_column}'s own input.
+
+  \item \textbf{GroupByAggregate above WithColumn:} If the derived column
+        is neither a group key nor referenced in any aggregation expression,
+        the \texttt{with\_column} node is bypassed similarly.
+\end{itemize}
+
+The \texttt{SelectNames\,+\,WithColumn} case (projection of a named column
+subset that does not include the derived column) is already handled by
+\texttt{ApplyProjectionPushdown}; this pass covers the complementary
+expression-select and aggregation cases.
+
+\subsubsection*{Correctness}
+
+A \texttt{with\_column} operation appends or replaces exactly one column
+and leaves all other columns and rows unchanged.  If no downstream
+expression references the derived column, the output of the plan is
+identical whether or not the column was ever computed.  The membership
+check against \texttt{CollectColumnsFromExpr} is conservative: it scans
+the entire expression tree of every downstream expression, so no
+reference can be missed.
+
+\subsubsection*{Example}
+
+\begin{lstlisting}
+// Original
+scan_csv("employees.csv")
+  .with_column("double_salary", col("salary") * lit(2))
+  .select(std::vector<Expr>{col("id").alias("eid"), col("name")})
+  // "double_salary" not referenced in select expressions
+
+// After Dead WithColumn Elimination
+scan_csv("employees.csv")
+  .select(std::vector<Expr>{col("id").alias("eid"), col("name")})
+\end{lstlisting}
+
+In the smoke test this fires together with Constant Filter Elimination in a
+single optimiser pass, reducing a four-node logical plan to two nodes:
+
+\begin{center}
+\texttt{scan \textrightarrow{} filter(1==1) \textrightarrow{} with\_column("double\_salary") \textrightarrow{} select\_exprs}
+\\[0.3em]
+$\Downarrow$
+\\[0.3em]
+\texttt{scan \textrightarrow{} select\_exprs}
+\end{center}
+
+\subsubsection*{Performance benefit}
+
+Eliminates the expression evaluation kernel for the dead column entirely --
+no intermediate array is allocated or populated.  For expressions involving
+expensive string operations or long arithmetic chains this saving can be
+substantial.  The optimisation also reduces plan depth, which shortens the
+executor's dispatch loop.
 
 %------------------------------------------------------------------
 \subsection{Filter Merge (Predicate Conjunction)}
