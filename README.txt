@@ -97,6 +97,77 @@ Lazy mode (with query optimiser):
   output.write_parquet("summary.parquet");
 
 
+GENERATING SAMPLE DATA AND QUERY-PLAN PNGs
+------------------------------------------
+To exercise the library and produce output data files and optimised-plan
+PNGs, write a driver program (e.g. smoketest.cpp) and wire it into the
+build:
+
+  1. Create smoketest.cpp in the project root (or any subdirectory).
+     Example contents:
+
+       #include "dataframelib/dataframelib.h"
+       #include <filesystem>
+       using namespace dataframelib;
+       int main() {
+           std::filesystem::create_directories("data");
+           std::filesystem::create_directories("generated");
+           // --- write sample CSV ---
+           // (see QUICK EXAMPLE above for API usage)
+           auto df = scan_csv("data/input.csv")
+               .filter(col("age") > 30)
+               .select({"name", "salary"});
+           df.explain("generated/plan.png");  // plan_logical + plan_optimized
+           df.collect().write_csv("data/output.csv");
+       }
+
+  NOTE -- assert() is disabled in Release builds:
+  CMake's Release mode adds -DNDEBUG, which silently turns every assert()
+  into a no-op.  A smoketest that uses assert() will appear to pass even
+  when writes fail or row counts are wrong.  Use one of these instead:
+
+    Option A -- explicit checks (recommended, works in any build type):
+
+       static void check(bool ok, const char* msg) {
+           if (!ok) throw std::runtime_error(msg);
+       }
+       static void check_status(const arrow::Status& s, const char* msg) {
+           if (!s.ok())
+               throw std::runtime_error(std::string(msg) + ": " + s.ToString());
+       }
+       // then in main():
+       check_status(df.write_csv("data/out.csv"), "write_csv");
+       check(std::filesystem::exists("data/out.csv"), "file not created");
+
+    Option B -- undefine NDEBUG for the smoketest target only:
+
+       target_compile_options(smoketest PRIVATE -UNDEBUG)
+
+    The smoketest.cpp included in this project uses Option A together
+    with Option B.
+
+  2. Add the following lines to CMakelists.txt (after the install() block):
+
+       add_executable(smoketest smoketest.cpp)
+       target_link_libraries(smoketest PRIVATE dataframelib)
+       target_compile_options(smoketest PRIVATE -UNDEBUG)
+
+  3. Rebuild and run:
+
+       cmake -B build -DCMAKE_BUILD_TYPE=Release
+       cmake --build build -j$(sysctl -n hw.logicalcpu)   # macOS
+       cmake --build build -j$(nproc)                      # Linux
+       ./build/smoketest
+
+  Output files will appear under data/ and generated/:
+    data/output.csv
+    generated/plan_logical.png
+    generated/plan_optimized.png
+
+  Graphviz must be installed for the PNG files to be generated
+  (see DEPENDENCIES above).
+
+
 CLEANUP
 -------
 Remove all build artefacts:

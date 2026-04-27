@@ -33,3 +33,7 @@ install(TARGETS dataframelib
     ARCHIVE DESTINATION lib
     LIBRARY DESTINATION lib)
 install(DIRECTORY include/ DESTINATION include)
+
+add_executable(smoketest smoketest.cpp)
+target_link_libraries(smoketest PRIVATE dataframelib)
+target_compile_options(smoketest PRIVATE -UNDEBUG)
