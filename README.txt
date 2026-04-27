@@ -56,9 +56,9 @@ To install to a custom prefix, replace /usr/local with any path, e.g.:
   cmake --install build --prefix $HOME/.local
 
 
-USING THE LIBRARY IN YOUR PROJECT
-----------------------------------
-After installation, add to your CMakeLists.txt:
+USING THE LIBRARY
+-----------------
+After installation, add to CMakeLists.txt:
 
   find_package(Arrow REQUIRED)
   find_package(Parquet REQUIRED)
