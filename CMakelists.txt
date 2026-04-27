@@ -31,6 +31,9 @@ target_link_libraries(dataframelib
 add_executable(csv_smoketest tests/csv_smoketest.cpp)
 target_link_libraries(csv_smoketest PRIVATE dataframelib)
 target_compile_options(csv_smoketest PRIVATE -UNDEBUG)
+target_compile_definitions(csv_smoketest PRIVATE
+    SMOKETEST_DATA_DIR="${CMAKE_SOURCE_DIR}/data"
+    SMOKETEST_GEN_DIR="${CMAKE_SOURCE_DIR}/generated")
 
 install(TARGETS dataframelib
     ARCHIVE DESTINATION lib
