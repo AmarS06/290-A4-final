@@ -82,11 +82,7 @@ int main() {
     assert(lazy_result.write_csv(kData+"/lazy_output.csv").ok());
     std::cout << "Lazy output:  " << kData << "/lazy_output.csv\n";
 
-    // Constant filter elimination + dead WithColumn elimination demo.
-    // Logical:   scan -> filter(1==1) -> with_column("double_salary") -> select_exprs([eid, name])
-    // Optimized: scan -> select_exprs([eid, name])
-    //   pass 1: lit(1)==lit(1) folds to lit(true), filter(true) removed;
-    //           SelectExprs sees with_column("double_salary") not referenced -> removed.
+    // Constant filter elimination + dead WithColumn elimination
     auto dead_plan = scan_csv(emp_csv)
         .filter(lit(1) == lit(1))
         .with_column("double_salary", col("salary") * lit(2))
