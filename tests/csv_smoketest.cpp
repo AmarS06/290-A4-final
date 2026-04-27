@@ -64,8 +64,6 @@ int main() {
     assert(eager_result.write_csv(kData+"/eager_output.csv").ok());
     std::cout << "Eager output: " << kData << "/eager_output.csv\n";
 
-    // Naive ordering: sort before filter, filter after join — the optimizer
-    // pushes the filter before the sort and before the join.
     auto lazy_plan = scan_csv(emp_csv)
         .sort({"salary"}, false)
         .filter(col("age") >= 28)
@@ -84,10 +82,27 @@ int main() {
     assert(lazy_result.write_csv(kData+"/lazy_output.csv").ok());
     std::cout << "Lazy output:  " << kData << "/lazy_output.csv\n";
 
+    // GroupBy predicate pushdown check
+    auto groupby_plan = scan_csv(emp_csv)
+        .join(scan_csv(dept_csv), {"dept_id"}, "inner")
+        .group_by({"dept_name"})
+        .aggregate({{"salary", "mean"}})
+        .filter(col("dept_name") == lit("Engineering"));
+
+    assert(groupby_plan.explain(kGen+"/groupby_plan.png").ok());
+    std::cout << "GroupBy logical:   " << kGen << "/groupby_plan_logical.png\n";
+    std::cout << "GroupBy optimized: " << kGen << "/groupby_plan_optimized.png\n";
+
+    auto groupby_result = groupby_plan.collect();
+    assert(groupby_result.num_rows()==1);
+    assert(groupby_result.num_columns()==2);
+
     assert(std::filesystem::exists(kData+"/eager_output.csv"));
     assert(std::filesystem::exists(kData+"/lazy_output.csv"));
     assert(std::filesystem::exists(kGen+"/plan_logical.png"));
     assert(std::filesystem::exists(kGen+"/plan_optimized.png"));
+    assert(std::filesystem::exists(kGen+"/groupby_plan_logical.png"));
+    assert(std::filesystem::exists(kGen+"/groupby_plan_optimized.png"));
 
     std::cout << "All smoke tests passed.\n";
     return 0;

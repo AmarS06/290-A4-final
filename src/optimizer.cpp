@@ -830,6 +830,27 @@ std::shared_ptr<PlanNode> ApplyPredicatePushdown(const std::shared_ptr<PlanNode>
                 pushed_filter, sort->columns(), sort->ascending());
         }
     }
+    // Predicate pushdown through GroupByAggregate
+    if (outer_filter->input()->kind()==PlanNode::Kind::GroupByAggregate) {
+        const auto* groupby=dynamic_cast<const GroupByAggregateNode*>(outer_filter->input().get());
+        if (groupby) {
+            std::unordered_set<std::string> predicate_cols;
+            CollectColumnsFromExpr(outer_filter->predicate().node_ptr(), &predicate_cols);
+            bool only_key_cols=true;
+            for (const auto& col_name : predicate_cols) {
+                if (std::find(groupby->keys().begin(), groupby->keys().end(), col_name)==
+                    groupby->keys().end()) {
+                    only_key_cols=false;
+                    break;
+                }
+            }
+            if (only_key_cols) {
+                auto pushed_filter=std::make_shared<FilterNode>(groupby->input(), outer_filter->predicate());
+                return std::make_shared<GroupByAggregateNode>(
+                    pushed_filter, groupby->keys(), groupby->agg_map());
+            }
+        }
+    }
     if (outer_filter->input()->kind()==PlanNode::Kind::Join) {
         const auto* join=dynamic_cast<const JoinNode*>(outer_filter->input().get());
         if (join) {
