@@ -2,14 +2,11 @@
 #include <cmath>
 #include <stdexcept>
 #include <arrow/scalar.h>
-
 namespace dataframelib {
-
 Expr::Expr(int value) : node_(lit(static_cast<int32_t>(value)).node_) {}
 Expr::Expr(double value) : node_(lit(value).node_) {}
 Expr::Expr(const char* value) : node_(lit(std::string(value)).node_) {}
 Expr::Expr(std::string value) : node_(lit(std::move(value)).node_) {}
-
 Expr Expr::operator+(const Expr& rhs) const {
     return Expr(std::make_shared<BinaryNode>(BinaryOpKind::kAdd, node_, rhs.node_));
 }
@@ -89,7 +86,6 @@ Expr Expr::mean() const  { return Expr(std::make_shared<AggNode>(AggOpKind::kMea
 Expr Expr::count() const { return Expr(std::make_shared<AggNode>(AggOpKind::kCount, node_)); }
 Expr Expr::min() const   { return Expr(std::make_shared<AggNode>(AggOpKind::kMin,   node_)); }
 Expr Expr::max() const   { return Expr(std::make_shared<AggNode>(AggOpKind::kMax,   node_)); }
-
 Expr Expr::alias(std::string name) const {
     return Expr(std::make_shared<AliasNode>(std::move(name), node_));
 }
@@ -131,36 +127,36 @@ Expr lit(const char* value) {
 }
 
 std::string LitNode::ToString() const {
-    if (!scalar_ || !scalar_->is_valid) {
+    if (!scalar_||!scalar_->is_valid) {
         return "lit(null)";
     }
-    if (scalar_->type->id() == arrow::Type::STRING) {
-        return "lit(\"" + scalar_->ToString() + "\")";
+    if (scalar_->type->id()==arrow::Type::STRING) {
+        return "lit(\""+scalar_->ToString()+"\")";
     }
-    return "lit(" + scalar_->ToString() + ")";
+    return "lit("+scalar_->ToString()+")";
 }
 
 std::string BinaryNode::ToString() const {
-    static const char* const kSymbols[] = {
+    static const char* const kSymbols[]={
         "+", "-", "*", "/", "%",           
         "==", "!=", "<", "<=", ">", ">=",  
         "&", "|",                           
     };
-    const int idx = static_cast<int>(op_);
-    return "(" + left_->ToString() + " " + kSymbols[idx] + " " +
-           right_->ToString() + ")";
+    const int idx=static_cast<int>(op_);
+    return "("+left_->ToString()+" "+kSymbols[idx]+" " +
+           right_->ToString()+")";
 }
 
 std::string UnaryNode::ToString() const {
     switch (op_) {
         case UnaryOpKind::kNot:
-            return "!(" + input_->ToString() + ")";
+            return "!("+input_->ToString()+")";
         case UnaryOpKind::kAbs:
-            return "abs(" + input_->ToString() + ")";
+            return "abs("+input_->ToString()+")";
         case UnaryOpKind::kIsNull:
-            return input_->ToString() + ".is_null()";
+            return input_->ToString()+".is_null()";
         case UnaryOpKind::kIsNotNull:
-            return input_->ToString() + ".is_not_null()";
+            return input_->ToString()+".is_not_null()";
     }
     return "";
 }
@@ -168,28 +164,28 @@ std::string UnaryNode::ToString() const {
 std::string StringOpNode::ToString() const {
     switch (op_) {
         case StringOpKind::kLength:
-            return input_->ToString() + ".length()";
+            return input_->ToString()+".length()";
         case StringOpKind::kContains:
-            return input_->ToString() + ".contains(\"" + arg_ + "\")";
+            return input_->ToString()+".contains(\""+arg_+"\")";
         case StringOpKind::kStartsWith:
-            return input_->ToString() + ".starts_with(\"" + arg_ + "\")";
+            return input_->ToString()+".starts_with(\""+arg_+"\")";
         case StringOpKind::kEndsWith:
-            return input_->ToString() + ".ends_with(\"" + arg_ + "\")";
+            return input_->ToString()+".ends_with(\""+arg_+"\")";
         case StringOpKind::kToLower:
-            return input_->ToString() + ".to_lower()";
+            return input_->ToString()+".to_lower()";
         case StringOpKind::kToUpper:
-            return input_->ToString() + ".to_upper()";
+            return input_->ToString()+".to_upper()";
     }
     return "";
 }
 
 std::string AggNode::ToString() const {
     switch (op_) {
-        case AggOpKind::kSum:   return input_->ToString() + ".sum()";
-        case AggOpKind::kMean:  return input_->ToString() + ".mean()";
-        case AggOpKind::kCount: return input_->ToString() + ".count()";
-        case AggOpKind::kMin:   return input_->ToString() + ".min()";
-        case AggOpKind::kMax:   return input_->ToString() + ".max()";
+        case AggOpKind::kSum:   return input_->ToString()+".sum()";
+        case AggOpKind::kMean:  return input_->ToString()+".mean()";
+        case AggOpKind::kCount: return input_->ToString()+".count()";
+        case AggOpKind::kMin:   return input_->ToString()+".min()";
+        case AggOpKind::kMax:   return input_->ToString()+".max()";
     }
     return "";
 }
