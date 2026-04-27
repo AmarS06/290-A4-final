@@ -152,24 +152,43 @@ build:
        target_link_libraries(smoketest PRIVATE dataframelib)
        target_compile_options(smoketest PRIVATE -UNDEBUG)
 
-  3. Rebuild and run:
+  3. Full pipeline -- build, run, inspect, then clean up:
 
+       # build
        cmake -B build -DCMAKE_BUILD_TYPE=Release
        cmake --build build -j$(sysctl -n hw.logicalcpu)   # macOS
        cmake --build build -j$(nproc)                      # Linux
+
+       # run (writes to data/ and generated/)
        ./build/smoketest
 
-  Output files will appear under data/ and generated/:
-    data/output.csv
-    generated/plan_logical.png
-    generated/plan_optimized.png
+       # inspect outputs
+       ls data/ generated/
+
+       # remove all generated artefacts when done
+       rm -rf build data generated
+
+  Output files produced by ./build/smoketest:
+    data/employees.csv            -- generated input data
+    data/departments.csv          -- generated input data
+    data/eager_output.csv         -- result of the eager query
+    data/lazy_output.csv          -- result of the lazy query
+    generated/plan_logical.png    -- unoptimised query-plan DAG
+    generated/plan_optimized.png  -- optimised query-plan DAG
+    generated/join_split_logical.png   -- join predicate split (before)
+    generated/join_split_optimized.png -- join predicate split (after)
 
   Graphviz must be installed for the PNG files to be generated
   (see DEPENDENCIES above).
 
+  Important: data/ and generated/ are created by the smoketest at
+  runtime.  Remove them before submission or packaging:
+
+       rm -rf data generated
+
 
 CLEANUP
 -------
-Remove all build artefacts:
+Remove all build and runtime artefacts before packaging for submission:
 
-  rm -rf build
+  rm -rf build data generated
